@@ -9,8 +9,8 @@ RouteCast helps a truck driver pick the safest route. You enter an origin, a des
 5. **recommends** the best route (fewest Severe miles → fewest High miles → lowest average risk → shortest time),
 6. shows the routes, checkpoints, risk levels, ETAs and summaries on a **map**, with a **weather heatmap** along the corridor and a **0–48 h forecast slider**.
 
-- **Live app:** _add Vercel URL_
-- **API:** _add Render URL_ (`/api/health`)
+- **Live app:** https://routecast-rose.vercel.app
+- **API:** https://routecast-api-2xus.onrender.com/api/health
 - **Walkthrough:** _add Loom URL_
 
 > The API runs on Render's free tier, which sleeps after 15 idle minutes. The app pings the API as soon as the page opens (and shows a "waking up" message if that takes a while), then keeps it awake with a small ping every 10 minutes while the tab is open.
