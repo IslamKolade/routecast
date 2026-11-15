@@ -94,6 +94,7 @@ export interface Heatmap {
 }
 
 export interface PlanResponse {
+  status: 'complete';
   request: {
     origin: Place;
     destination: Place;
@@ -128,3 +129,11 @@ export interface PlanRequest {
 }
 
 export type HeatmapMetric = 'level' | 'wind_level' | 'rain_level' | 'snow_level';
+
+/** Sent by the server when it needs the browser to download forecasts (see api.ts). */
+export interface WeatherRequest {
+  url: string;
+  params: Record<string, string>;
+  cells: [number, number][]; // [lat, lon]
+  chunk_size: number;
+}

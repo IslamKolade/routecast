@@ -32,6 +32,11 @@ class NoRouteError(PlannerError):
     code = "no_route"
 
 
+class PlanExpiredError(PlannerError):
+    status_code = status.HTTP_410_GONE
+    code = "plan_expired"
+
+
 class UpstreamServiceError(PlannerError):
     """A third-party API (routing / weather) failed or is unavailable."""
 

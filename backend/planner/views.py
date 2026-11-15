@@ -3,7 +3,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .serializers import PlanRequestSerializer
-from .services.planner import plan_trip
+from .services.planner import complete_plan, plan_trip
 from .services.tomtom import TomTomClient
 
 GEOCODE_CACHE_SECONDS = 24 * 3600
@@ -35,3 +35,9 @@ def plan(request):
     serializer = PlanRequestSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
     return Response(plan_trip(serializer.to_trip()))
+
+
+@api_view(["POST"])
+def plan_weather(request, plan_id: str):
+    """Weather relay: finish a plan with forecasts the browser downloaded (see planner.py)."""
+    return Response(complete_plan(plan_id, request.data.get("forecasts") if isinstance(request.data, dict) else None))

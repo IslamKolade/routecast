@@ -35,7 +35,7 @@ from typing import Iterable
 
 import requests
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import cache, caches
 
 from ..exceptions import UpstreamServiceError
 from .geo import LatLon
@@ -124,31 +124,55 @@ def _sum_or_none(a, b):
     return round((a or 0.0) + (b or 0.0), 4)
 
 
-def _parse(item: dict, start: datetime) -> Forecast:
-    hourly = item.get("hourly") or {}
+def _numbers(values, name: str, hours: int) -> list:
+    """Validate one hourly series: a list of at least `hours` numbers (or nulls)."""
+    if not isinstance(values, list) or len(values) < hours:
+        raise UpstreamServiceError(f"Weather data is missing hourly values for {name}.")
+    values = values[:hours]
+    if not all(v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)) for v in values):
+        raise UpstreamServiceError(f"Weather data for {name} contains non-numeric values.")
+    return values
+
+
+def parse_item(item: dict, start: datetime, end: datetime) -> Forecast:
+    """
+    Turn one Open-Meteo location result into a Forecast covering [start, end].
+    Used for responses fetched by the server and for data relayed by the browser,
+    so both are validated the same way.
+    """
+    hourly = item.get("hourly") if isinstance(item, dict) else None
+    if not isinstance(hourly, dict):
+        raise UpstreamServiceError("Weather data is missing the hourly section.")
     times = hourly.get("time") or []
-    if not times or datetime.fromisoformat(times[0]).replace(tzinfo=timezone.utc) != start:
+    hours = int((end - start) / HOUR) + 1
+    try:
+        first = datetime.fromisoformat(times[0]).replace(tzinfo=timezone.utc)
+    except (IndexError, TypeError, ValueError):
+        first = None
+    if first != start or len(times) < hours:
         raise UpstreamServiceError("The weather service returned an unexpected time range.")
-    rain = [_sum_or_none(r, s) for r, s in zip(hourly["rain"], hourly["showers"])]
+    series = {name: _numbers(hourly.get(name), name, hours) for name in HOURLY_VARS}
     return Forecast(
         start=start,
-        wind=hourly["wind_speed_10m"],
-        gust=hourly["wind_gusts_10m"],
-        rain=rain,
-        snow=hourly["snowfall"],
-        temp=hourly["temperature_2m"],
-        code=hourly["weather_code"],
+        wind=series["wind_speed_10m"],
+        gust=series["wind_gusts_10m"],
+        rain=[_sum_or_none(r, s) for r, s in zip(series["rain"], series["showers"])],
+        snow=series["snowfall"],
+        temp=series["temperature_2m"],
+        code=series["weather_code"],
     )
 
 
-def _cache_key(cell: LatLon, start: datetime, end: datetime) -> str:
-    return f"wx:v1:{cell[0]:.2f}:{cell[1]:.2f}:{start:%Y%m%d%H}:{end:%Y%m%d%H}"
+class WeatherRateLimitError(UpstreamServiceError):
+    """Open-Meteo refused the server's requests (free-tier limit, counted per IP address)."""
 
 
-def _fetch_chunk(cells: list[LatLon], start: datetime, end: datetime) -> list[Forecast]:
-    params = {
-        "latitude": ",".join(f"{c[0]:.4f}" for c in cells),
-        "longitude": ",".join(f"{c[1]:.4f}" for c in cells),
+def request_params(start: datetime, end: datetime) -> dict:
+    """Query parameters for an Open-Meteo request, minus the coordinates.
+
+    Shared by the server and the browser relay, so both ask for exactly the same data.
+    """
+    return {
         "hourly": ",".join(HOURLY_VARS),
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
@@ -157,14 +181,24 @@ def _fetch_chunk(cells: list[LatLon], start: datetime, end: datetime) -> list[Fo
         "start_hour": start.strftime("%Y-%m-%dT%H:%M"),
         "end_hour": end.strftime("%Y-%m-%dT%H:%M"),
     }
+
+
+def _cache_key(cell: LatLon, start: datetime, end: datetime) -> str:
+    return f"wx:v2:{cell[0]:.2f}:{cell[1]:.2f}:{start:%Y%m%d%H}:{end:%Y%m%d%H}"
+
+
+def _fetch_chunk(cells: list[LatLon], start: datetime, end: datetime) -> list[Forecast]:
+    params = {
+        "latitude": ",".join(f"{c[0]:.4f}" for c in cells),
+        "longitude": ",".join(f"{c[1]:.4f}" for c in cells),
+        **request_params(start, end),
+    }
     try:
         resp = requests.get(API_URL, params=params, timeout=settings.HTTP_TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         raise UpstreamServiceError("The weather service could not be reached. Please try again.") from exc
     if resp.status_code == 429:
-        raise UpstreamServiceError(
-            "The weather service rate limit was reached. Try again in a minute or use a wider checkpoint interval."
-        )
+        raise WeatherRateLimitError("The weather service rate limit was reached. Please try again in a minute.")
     if resp.status_code != 200:
         reason = ""
         try:
@@ -177,31 +211,60 @@ def _fetch_chunk(cells: list[LatLon], start: datetime, end: datetime) -> list[Fo
     items = data if isinstance(data, list) else [data]
     if len(items) != len(cells):
         raise UpstreamServiceError("The weather service returned an unexpected number of locations.")
-    return [_parse(item, start) for item in items]
+    return [parse_item(item, start, end) for item in items]
+
+
+def window(start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    """Whole-hour UTC window used for every lookup and cache key."""
+    return floor_hour(start), floor_hour(end)
+
+
+def cached_forecasts(cells: Iterable[LatLon], start: datetime, end: datetime) -> dict[LatLon, Forecast]:
+    """Forecasts already in the cache, for whichever of `cells` have one."""
+    start, end = window(start, end)
+    keys = {_cache_key(cell, start, end): cell for cell in dict.fromkeys(cells)}
+    found = cache.get_many(list(keys))
+    return {keys[k]: v for k, v in found.items()}
+
+
+def store_forecasts(forecasts: dict[LatLon, Forecast], start: datetime, end: datetime) -> None:
+    start, end = window(start, end)
+    cache.set_many(
+        {_cache_key(cell, start, end): f for cell, f in forecasts.items()}, settings.WEATHER_CACHE_SECONDS
+    )
+
+
+# After the server is rate-limited, skip server-side requests for a while: the
+# browser relay is used straight away instead of waiting on a request that fails.
+_BLOCKED_KEY = "wx:server-rate-limited"
+SERVER_BLOCK_SECONDS = 10 * 60
+
+
+def server_rate_limited() -> bool:
+    return bool(caches["shared"].get(_BLOCKED_KEY))
 
 
 def fetch_forecasts(cells: Iterable[LatLon], start: datetime, end: datetime) -> dict[LatLon, Forecast]:
     """
-    Hourly forecasts for every grid cell, covering [start, end] (UTC, whole hours).
-    Cells must already be snapped with `snap()`.
+    Hourly forecasts for every cell, covering [start, end] (UTC, whole hours),
+    from the cache or from Open-Meteo. Cells must already be snapped with `snap()`.
+    Raises WeatherRateLimitError if Open-Meteo refuses the server.
     """
-    start, end = floor_hour(start), floor_hour(end)
+    start, end = window(start, end)
     unique = list(dict.fromkeys(cells))
-    result: dict[LatLon, Forecast] = {}
-    missing: list[LatLon] = []
-    for cell in unique:
-        cached = cache.get(_cache_key(cell, start, end))
-        if cached is not None:
-            result[cell] = cached
-        else:
-            missing.append(cell)
-
+    result = cached_forecasts(unique, start, end)
+    missing = [c for c in unique if c not in result]
     chunks = [missing[i : i + CHUNK_SIZE] for i in range(0, len(missing), CHUNK_SIZE)]
     if chunks:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(chunks))) as pool:
-            for chunk, forecasts in zip(chunks, pool.map(lambda c: _fetch_chunk(c, start, end), chunks)):
-                for cell, forecast in zip(chunk, forecasts):
-                    result[cell] = forecast
-                    cache.set(_cache_key(cell, start, end), forecast, settings.WEATHER_CACHE_SECONDS)
+        try:
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(chunks))) as pool:
+                fetched = {}
+                for chunk, forecasts in zip(chunks, pool.map(lambda c: _fetch_chunk(c, start, end), chunks)):
+                    fetched.update(zip(chunk, forecasts))
+        except WeatherRateLimitError:
+            caches["shared"].set(_BLOCKED_KEY, True, SERVER_BLOCK_SECONDS)
+            raise
+        store_forecasts(fetched, start, end)
+        result.update(fetched)
     logger.info("Weather: %d cells (%d from cache)", len(unique), len(unique) - len(missing))
     return result

@@ -7,6 +7,7 @@ configured. All secrets and deployment-specific values come from environment
 variables (a local `.env` file is loaded in development).
 """
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -58,12 +59,23 @@ LANGUAGE_CODE = "en-us"
 USE_I18N = False
 
 CACHES = {
+    # Weather and geocoding lookups: fast, per worker process.
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "routecast",
         "OPTIONS": {"MAX_ENTRIES": 20000},
-    }
+    },
+    # Small state every gunicorn worker must see: plan drafts for the weather relay
+    # and the "server is rate-limited" flag. File-based so it is shared on the instance.
+    "shared": {
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": os.environ.get("CACHE_DIR", os.path.join(tempfile.gettempdir(), "routecast-cache")),
+        "OPTIONS": {"MAX_ENTRIES": 2000},
+    },
 }
+
+# Relayed weather for a long trip can be a couple of MB of JSON.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 15 * 1024 * 1024
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],

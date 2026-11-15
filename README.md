@@ -105,8 +105,17 @@ Miles are compared to 0.1 mi and average risk to 0.001, so floating-point noise 
 - **Checkpoints**: dots coloured by risk level. Hover for mile, ETA and risk; click for the full forecast (wind, gusts, rain, snow, which condition set the level, any load rule that applied).
 - Selecting a checkpoint also moves the forecast time to the moment the truck reaches it, so the heatmap shows the conditions it will actually meet there.
 
-### Rate limits
-Open-Meteo's free tier allows about 600 location lookups per minute, so one plan is capped at about 500. Checkpoints take priority and the heatmap uses the remainder (minimum 100 cells). Only for very long trips at 10-mile sampling (e.g. coast to coast) are checkpoints snapped to a coarser grid (0.1° or more) instead of their exact position; the UI shows a note when that happens.
+### Rate limits and the weather relay
+Open-Meteo's free tier allows about 600 location lookups per minute **per IP address**. One plan is capped at about 350: checkpoints take priority, and the heatmap uses the remainder (minimum 100 cells). Only for very long trips at 10-mile sampling (e.g. coast to coast) are checkpoints snapped to a coarser grid instead of their exact position; the UI shows a note when that happens.
+
+On free hosting, many apps share one outgoing IP, so other people's traffic can use up that quota and get the server rate-limited. RouteCast handles this with a **weather relay**:
+
+1. `POST /api/plan` computes the routes, checkpoints and heatmap grid as usual, then tries to download the forecasts.
+2. If Open-Meteo refuses (HTTP 429), the server saves this work as a draft for 15 minutes and replies `{"status": "weather_required", "plan_id", "weather_request"}`. The `weather_request` lists the exact cells and query parameters.
+3. The browser downloads exactly that from Open-Meteo, from the viewer's own IP, and posts the results to `POST /api/plan/<plan_id>/weather`.
+4. The server validates the data (time range, every series numeric, one result per cell) and finishes the plan: risk at every checkpoint, ranking and heatmap.
+
+All risk and recommendation logic stays on the server; only the download is relayed. After a 429 the server skips its own attempts for 10 minutes, and relayed forecasts are cached, so repeated plans stay fast.
 
 ## API
 
@@ -114,7 +123,8 @@ Open-Meteo's free tier allows about 600 location lookups per minute, so one plan
 |---|---|---|
 | GET | `/api/health` | Liveness check |
 | GET | `/api/geocode?q=dallas` | Place suggestions (TomTom Search; US/CA/MX) |
-| POST | `/api/plan` | Full trip plan |
+| POST | `/api/plan` | Full trip plan (or a weather relay request, see above) |
+| POST | `/api/plan/<plan_id>/weather` | Finish a plan with relayed forecasts |
 
 `POST /api/plan` body:
 ```json
@@ -144,7 +154,7 @@ backend/
       planner.py          the pipeline
       tomtom.py, geo.py   API client, geometry helpers
     serializers.py, views.py, exceptions.py
-    tests/                68 tests (rules, ranking, ETA, weather, routes, API)
+    tests/                74 tests (rules, ranking, ETA, weather, relay, routes, API)
 frontend/
   src/
     components/           TripForm, PlaceInput, RouteList, CheckpointTable, RouteMap, ForecastPanel

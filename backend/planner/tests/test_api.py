@@ -1,7 +1,7 @@
 from datetime import timedelta
 from unittest import mock
 
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -40,6 +40,7 @@ def fake_client():
 class PlanEndpointTests(SimpleTestCase):
     def setUp(self):
         cache.clear()
+        caches["shared"].clear()
         self.api = APIClient()
 
     def post(self, body, wind=10.0, rain=0.0):
@@ -151,6 +152,94 @@ class PlanEndpointTests(SimpleTestCase):
         body = payload(departure_time=(timezone.now() - timedelta(minutes=20)).isoformat())
         resp, _ = self.post(body)
         self.assertEqual(resp.status_code, 200, resp.content)
+
+
+def relay_items(weather_request, wind=10.0, rain=0.0):
+    """What the browser does: fetch the requested cells with the given params, in order."""
+    cells = weather_request["cells"]
+    params = dict(weather_request["params"])
+    params["latitude"] = ",".join(str(c[0]) for c in cells)
+    params["longitude"] = ",".join(str(c[1]) for c in cells)
+    data = open_meteo_response(params, wind, rain).json()
+    return data if isinstance(data, list) else [data]
+
+
+@override_settings(TOMTOM_API_KEY="test")
+class WeatherRelayTests(SimpleTestCase):
+    """When Open-Meteo rate-limits the server, the browser relays the weather download."""
+
+    def setUp(self):
+        cache.clear()
+        caches["shared"].clear()
+        self.api = APIClient()
+
+    def start_plan(self, weather_status=429):
+        limited = mock.Mock(status_code=weather_status)
+        with mock.patch.object(planner_module, "TomTomClient", return_value=fake_client()), mock.patch.object(
+            weather.requests, "get", return_value=limited
+        ) as get:
+            resp = self.api.post("/api/plan", payload(), format="json")
+        return resp, get
+
+    def test_rate_limited_server_asks_browser_for_weather(self):
+        resp, _ = self.start_plan()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["status"], "weather_required")
+        req = data["weather_request"]
+        self.assertEqual(req["url"], weather.API_URL)
+        self.assertEqual(req["params"]["wind_speed_unit"], "mph")
+        self.assertEqual(req["params"]["precipitation_unit"], "inch")
+        self.assertGreater(len(req["cells"]), 0)
+
+        done = self.api.post(f"/api/plan/{data['plan_id']}/weather",
+                             {"forecasts": relay_items(req, wind=40.0)}, format="json")
+        self.assertEqual(done.status_code, 200, done.content)
+        plan = done.json()
+        self.assertEqual(plan["status"], "complete")
+        self.assertEqual(len(plan["routes"]), 3)
+        # The relayed data goes through the same risk rules: 40 mph + 45,000 lb -> Severe.
+        self.assertEqual(plan["routes"][0]["checkpoints"][1]["risk"]["level"], "SEVERE")
+        self.assertEqual(len(plan["heatmap"]["frames"]), 49)
+
+    def test_server_stops_trying_while_rate_limited(self):
+        self.start_plan()
+        _, get = self.start_plan(weather_status=200)
+        get.assert_not_called()
+
+    def test_relayed_weather_is_cached_for_the_next_plan(self):
+        data = self.start_plan()[0].json()
+        self.api.post(f"/api/plan/{data['plan_id']}/weather",
+                      {"forecasts": relay_items(data["weather_request"])}, format="json")
+        again = self.start_plan()[0].json()
+        self.assertEqual(again["status"], "complete")
+
+    def test_plan_can_only_be_completed_once(self):
+        data = self.start_plan()[0].json()
+        url = f"/api/plan/{data['plan_id']}/weather"
+        items = relay_items(data["weather_request"])
+        self.assertEqual(self.api.post(url, {"forecasts": items}, format="json").status_code, 200)
+        self.assertEqual(self.api.post(url, {"forecasts": items}, format="json").status_code, 410)
+
+    def test_unknown_plan_is_gone(self):
+        resp = self.api.post("/api/plan/nope/weather", {"forecasts": []}, format="json")
+        self.assertEqual(resp.status_code, 410)
+        self.assertEqual(resp.json()["error"]["code"], "plan_expired")
+
+    def test_rejects_wrong_or_malformed_weather(self):
+        data = self.start_plan()[0].json()
+        url = f"/api/plan/{data['plan_id']}/weather"
+        items = relay_items(data["weather_request"])
+        self.assertEqual(self.api.post(url, {"forecasts": items[:-1]}, format="json").status_code, 400)
+        bad = [dict(i) for i in items]
+        bad[0] = {"hourly": {**items[0]["hourly"], "wind_speed_10m": ["strong"] * 60}}
+        resp = self.api.post(url, {"forecasts": bad}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("non-numeric", resp.json()["error"]["message"])
+        wrong_start = [{"hourly": {**i["hourly"], "time": i["hourly"]["time"][1:]}} for i in items]
+        self.assertEqual(self.api.post(url, {"forecasts": wrong_start}, format="json").status_code, 400)
+        # A rejected attempt does not consume the plan: valid data still completes it.
+        self.assertEqual(self.api.post(url, {"forecasts": items}, format="json").status_code, 200)
 
 
 class HealthAndGeocodeTests(SimpleTestCase):
