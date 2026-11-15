@@ -89,7 +89,7 @@ function RouteCard({ route, selected, onSelect }: { route: RouteOption; selected
       <div className="route-card__risk">
         <Stat label="Severe" value={formatMiles(s.severe_miles)} strong={s.severe_miles > 0} />
         <Stat label="High" value={formatMiles(s.high_miles)} strong={s.high_miles > 0} />
-        <Stat label="Avg risk" value={s.avg_risk.toFixed(2)} title="Mile-weighted: Low 0 · Moderate 1 · High 2 · Severe 3 · No Travel 4" />
+        <Stat label="Avg risk" value={s.avg_risk.toFixed(3)} title="Mile-weighted: Low 0 · Moderate 1 · High 2 · Severe 3 · No Travel 4" />
         <div className="stat">
           <span className="stat__label">Worst</span>
           <RiskBadge level={s.max_level} />

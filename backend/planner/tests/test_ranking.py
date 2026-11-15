@@ -73,6 +73,22 @@ class RecommendationTests(SimpleTestCase):
         b = route("B", [(10.0, R.HIGH), (90.000001, R.LOW)], 5)
         self.assertEqual(recommend([a, b]).route_id, "B")
 
+    def test_any_real_average_difference_decides_before_travel_time(self):
+        # Strictly per the brief: lower average risk wins even by 0.001, even if slower.
+        # (Live case Dallas -> Denver: same 25 High miles, C slightly longer.)
+        a = route("A", [(25, R.HIGH), (25, R.MODERATE), (832.8, R.LOW)], 11.88)
+        c = route("C", [(25, R.HIGH), (25, R.MODERATE), (841.3, R.LOW)], 12.77)
+        rec = recommend([a, c])
+        self.assertEqual(rec.route_id, "C")
+        self.assertIn("Lowest average risk (0.084 vs 0.085 on Route A)", rec.reason)
+
+    def test_small_real_mile_difference_decides(self):
+        a = route("A", [(12.53, R.SEVERE), (87.47, R.LOW)], 5)
+        b = route("B", [(12.51, R.SEVERE), (87.49, R.LOW)], 6)
+        rec = recommend([a, b])
+        self.assertEqual(rec.route_id, "B")
+        self.assertIn("12.51 mi vs 12.53 mi", rec.reason)
+
     def test_full_tie_keeps_provider_order(self):
         a = route("A", [(100, R.LOW)], 5)
         b = route("B", [(100, R.LOW)], 5)

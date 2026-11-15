@@ -17,8 +17,11 @@ No Travel conditions must never beat one that doesn't. We therefore rank on
 No Travel miles first. When every route has No Travel miles, the recommendation
 is still made but flagged with a warning.
 
-Miles are compared rounded to 0.1 mi and average risk to 0.001, so that floating
-point noise cannot decide a recommendation.
+Comparisons are strict: values are rounded to 6 decimal places only, which
+removes floating-point noise (e.g. 12.5 vs 12.500000000001) and nothing else.
+So any real difference decides, exactly as the brief's list says, however small.
+The explanation shown to the user prints enough decimals to make that
+difference visible (e.g. "0.112 vs 0.113").
 """
 from __future__ import annotations
 
@@ -26,6 +29,9 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from .risk import RiskLevel
+
+# Rounding used only to cancel floating-point noise in comparisons.
+_NOISE_DECIMALS = 6
 
 
 @dataclass(frozen=True)
@@ -51,10 +57,10 @@ class RouteRiskSummary:
 
     def sort_key(self) -> tuple:
         return (
-            round(self.no_travel_miles, 1),
-            round(self.severe_miles, 1),
-            round(self.high_miles, 1),
-            round(self.avg_risk, 3),
+            round(self.no_travel_miles, _NOISE_DECIMALS),
+            round(self.severe_miles, _NOISE_DECIMALS),
+            round(self.high_miles, _NOISE_DECIMALS),
+            round(self.avg_risk, _NOISE_DECIMALS),
             round(self.travel_time_s),
         )
 
@@ -65,7 +71,7 @@ class RouteRiskSummary:
             "no_travel_miles": round(self.no_travel_miles, 1),
             "severe_miles": round(self.severe_miles, 1),
             "high_miles": round(self.high_miles, 1),
-            "avg_risk": round(self.avg_risk, 3),
+            "avg_risk": round(self.avg_risk, 4),
             "max_level": self.max_level.name,
         }
 
@@ -116,17 +122,25 @@ def _fmt_duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
 
 
+def _distinguishing_digits(a: float, b: float, minimum: int) -> int:
+    """Fewest decimals (at least `minimum`) at which a and b print differently."""
+    for digits in range(minimum, _NOISE_DECIMALS + 1):
+        if f"{a:.{digits}f}" != f"{b:.{digits}f}":
+            return digits
+    return _NOISE_DECIMALS
+
+
 def _explain(best: RouteRiskSummary, runner_up: RouteRiskSummary) -> str:
     """Name the first criterion on which the winner beat the runner-up."""
     criteria = [
         ("Fewest No Travel miles", best.no_travel_miles, runner_up.no_travel_miles, 1, " mi"),
         ("Fewest Severe miles", best.severe_miles, runner_up.severe_miles, 1, " mi"),
         ("Fewest High miles", best.high_miles, runner_up.high_miles, 1, " mi"),
-        ("Lowest average risk", best.avg_risk, runner_up.avg_risk, 3, ""),
+        ("Lowest average risk", best.avg_risk, runner_up.avg_risk, 2, ""),
     ]
     for label, a, b, digits, unit in criteria:
-        if round(a, digits) != round(b, digits):
-            shown = 2 if digits == 3 else digits
+        if round(a, _NOISE_DECIMALS) != round(b, _NOISE_DECIMALS):
+            shown = _distinguishing_digits(a, b, digits)
             return f"{label} ({a:.{shown}f}{unit} vs {b:.{shown}f}{unit} on Route {runner_up.route_id})"
     if round(best.travel_time_s) != round(runner_up.travel_time_s):
         return (

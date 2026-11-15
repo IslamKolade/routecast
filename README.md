@@ -88,7 +88,7 @@ Routes are ranked **lexicographically**, so each criterion only matters when all
 3. lowest **average risk** (mile-weighted; Low = 0, Moderate = 1, High = 2, Severe = 3, No Travel = 4)
 4. shortest **travel time**
 
-Miles are compared to 0.1 mi and average risk to 0.001, so floating-point noise cannot decide the result. The UI names the criterion that decided the recommendation (for example, "Fewest Severe miles (0.0 mi vs 42.5 mi on Route B)"). It shows a warning if even the best route has Severe or No Travel miles.
+Comparisons are strict: values are rounded only at the 6th decimal place, which cancels floating-point noise and nothing else, so any real difference decides, as the brief's list says. For example, a route with 0.084 average risk beats one with 0.085, even if it is slower; travel time only decides when the risk criteria are equal. The UI names the criterion that decided the recommendation (for example, "Fewest Severe miles (0.0 mi vs 42.5 mi on Route B)"). It shows a warning if even the best route has Severe or No Travel miles.
 
 ### 6. Heatmap and slider
 - The corridor is every grid cell within 25–100 km of any route. The width scales with trip length; the grid step grows so the corridor stays at or under 300 cells.
@@ -154,7 +154,7 @@ backend/
       planner.py          the pipeline
       tomtom.py, geo.py   API client, geometry helpers
     serializers.py, views.py, exceptions.py
-    tests/                74 tests (rules, ranking, ETA, weather, relay, routes, API)
+    tests/                76 tests (rules, ranking, ETA, weather, relay, routes, API)
 frontend/
   src/
     components/           TripForm, PlaceInput, RouteList, CheckpointTable, RouteMap, ForecastPanel
